@@ -10,12 +10,13 @@ OFFSET_SIZE = 8
 PAGE_SIZE = 256
 NUM_FRAMES = 256
 REPLACEMENT_ALGORITHM = "fifo"
+USE_TLB = True
 
 
 @dataclass
 class PageTableEntry:
     frame: int
-    isValid: bool
+    is_valid: bool
 
 
 @dataclass
@@ -41,12 +42,12 @@ class TLB:
 
 
 # whee global variables
-page_table = [PageTableEntry(frame=-1, isValid=False) for _ in range(PAGE_TABLE_SIZE)]
+page_table = [PageTableEntry(frame=-1, is_valid=False) for _ in range(PAGE_TABLE_SIZE)]
 # we just store an array of ints as a "page" for each page of memory at each page index
 memory = [0] * NUM_FRAMES
-frames = [0] * NUM_FRAMES
+frames = [-1] * NUM_FRAMES
 logs = Logs(translated=0, faults=0, tlb_hits=0, tlb_misses=0)
-tlb = TLB({}, 0, 16, [])
+tlb = TLB({}, 0, 5, [])
 frame_queue = []
 
 
@@ -61,7 +62,7 @@ def read_page_from_store(page_index):
 
 
 def parse_input(input_path):
-    with open("addresses.txt", "r") as f:
+    with open(input_path, "r") as f:
         lines = f.readlines()
         lines = [line.strip() for line in lines]
         lines = [int(line) for line in lines]
@@ -79,53 +80,58 @@ def parse_address(x: int) -> Address:
 
 def fifo_replacement():
     victim_frame = frame_queue.pop(0)
-    frame_queue.append(victim_frame)
-    return victim_frame
+    previous_page_num = frames[victim_frame]
+    return victim_frame, previous_page_num
 
 
-def get_free_frame():
-    def insert_frame(frame):
-        frames[i] = 1
-        frame_queue.append(i)
+def get_free_frame(page_number):
+    def insert_frame(frame_number, page_number):
+        frames[frame_number] = page_number
+        if REPLACEMENT_ALGORITHM == "fifo":
+            frame_queue.append(frame_number)
 
     # searching for first free frame
     for i, frame in enumerate(frames):
-        if frame == 0:
-            insert_frame(i)
+        if frame == -1:
+            insert_frame(i, page_number)
             return i
     # find victim frame
     match REPLACEMENT_ALGORITHM:
         case "fifo":
-            replacer = fifo_replacement()
+            replacer = fifo_replacement
         case _:
-            replacer = fifo_replacement()
-    victim_frame = replacer()
-    insert_frame(victim_frame)
+            replacer = fifo_replacement
+    victim_frame, previous_page_num = replacer()
+    insert_frame(victim_frame, page_number)
+    page_table[previous_page_num].is_valid = False
     return victim_frame
 
 
 def kick_out_victim():
     victim_page = tlb.fifo_queue.pop(0)
     del tlb.tlb[victim_page]
+    page_table[victim_page].is_valid = False
+    tlb.current_size -= 1
 
 
 def add_to_tlb(page_index, entry):
+    tlb.current_size += 1
     tlb.tlb[page_index] = entry
     tlb.fifo_queue.append(page_index)
 
 
 def page_table_lookup(page_index):
     entry = page_table[page_index]
-    if entry.isValid:
-        return entry
+    if entry.is_valid:
+        return entry, True
     # if it's invalid we need to read it in
     logs.faults += 1
-    frame = get_free_frame()
-    new_entry = PageTableEntry(frame=frame, isValid=True)
+    frame = get_free_frame(page_index)
+    new_entry = PageTableEntry(frame=frame, is_valid=True)
     page_table[page_index] = new_entry
     page = read_page_from_store(page_index)
     memory[frame] = page
-    return new_entry
+    return new_entry, False
 
 
 def read_mem(frame, offset):
@@ -139,17 +145,18 @@ def read(logical_address: int):
     page_index = parsed_address.index
     offset = parsed_address.offset
     # checking the tlb
-    is_tlb_hit = page_index in tlb.tlb and tlb.tlb[page_index].isValid
+    is_tlb_hit = USE_TLB and page_index in tlb.tlb and tlb.tlb[page_index].is_valid
     if is_tlb_hit:
         # tlb hit
         logs.tlb_hits += 1
         entry = tlb.tlb[page_index]
         frame = entry.frame
         page, read_value = read_mem(entry.frame, offset)
+        did_hit = True
     else:
         # checking the page table
         logs.tlb_misses += 1
-        entry = page_table_lookup(page_index)
+        entry, did_hit = page_table_lookup(page_index)
         frame = entry.frame
         page, read_value = read_mem(frame, offset)
         # updating the TLB
@@ -158,13 +165,11 @@ def read(logical_address: int):
         add_to_tlb(page_index, entry)
 
     logs.translated += 1
-    read_value = page[offset]
-
     # constructing output
     # converting the bytes array to a grouped hex string
     hexed_numbers = [f"{byte:02X}" for byte in page]
     hexed_numbers = "".join(hexed_numbers)
-    output = f"{logical_address}, {read_value}, {frame}, {hexed_numbers}"
+    output = f"{page_index}, {read_value}, {frame}, {is_tlb_hit}, {did_hit}, {hexed_numbers}"
     return output
 
 
@@ -185,10 +190,17 @@ def main():
     parser.add_argument("pra", type=str, default="fifo", nargs="?")
     args = parser.parse_args()
     input_file = args.input_file
+
     global NUM_FRAMES
     NUM_FRAMES = args.num_frames
     global REPLACEMENT_ALGORITHM
     REPLACEMENT_ALGORITHM = args.pra
+
+    global memory
+    memory = [0] * NUM_FRAMES
+    global frames
+    frames = [-1] * NUM_FRAMES
+
     addresses = parse_input(input_file)
     for addresses in addresses:
         print(read(addresses))
