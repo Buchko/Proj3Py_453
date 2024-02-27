@@ -47,6 +47,7 @@ memory = [0] * NUM_FRAMES
 frames = [0] * NUM_FRAMES
 logs = Logs(translated=0, faults=0, tlb_hits=0, tlb_misses=0)
 tlb = TLB({}, 0, 16, [])
+frame_queue = []
 
 
 def read_page_from_store(page_index):
@@ -76,13 +77,31 @@ def parse_address(x: int) -> Address:
     return ans
 
 
+def fifo_replacement():
+    victim_frame = frame_queue.pop(0)
+    frame_queue.append(victim_frame)
+    return victim_frame
+
+
 def get_free_frame():
+    def insert_frame(frame):
+        frames[i] = 1
+        frame_queue.append(i)
+
+    # searching for first free frame
     for i, frame in enumerate(frames):
         if frame == 0:
-            frames[i] = 1
+            insert_frame(i)
             return i
-    print("out of memory")
-    sys.exit(1)
+    # find victim frame
+    match REPLACEMENT_ALGORITHM:
+        case "fifo":
+            replacer = fifo_replacement()
+        case _:
+            replacer = fifo_replacement()
+    victim_frame = replacer()
+    insert_frame(victim_frame)
+    return victim_frame
 
 
 def kick_out_victim():
@@ -90,24 +109,29 @@ def kick_out_victim():
     del tlb.tlb[victim_page]
 
 
-def add_to_tlb(page_index, page):
-    tlb.tlb[page_index] = page
+def add_to_tlb(page_index, entry):
+    tlb.tlb[page_index] = entry
     tlb.fifo_queue.append(page_index)
+
 
 def page_table_lookup(page_index):
     entry = page_table[page_index]
     if entry.isValid:
-        frame = entry.frame
-        page = memory[frame]
-        return frame, page
-    else:
-        logs.faults += 1
-        frame = get_free_frame()
-        new_entry = PageTableEntry(frame=frame, isValid=True)
-        page_table[page_index] = new_entry
-        page = read_page_from_store(page_index)
-        memory[frame] = page
-    return frame, page
+        return entry
+    # if it's invalid we need to read it in
+    logs.faults += 1
+    frame = get_free_frame()
+    new_entry = PageTableEntry(frame=frame, isValid=True)
+    page_table[page_index] = new_entry
+    page = read_page_from_store(page_index)
+    memory[frame] = page
+    return new_entry
+
+
+def read_mem(frame, offset):
+    page = memory[frame]
+    read_value = page[offset]
+    return page, read_value
 
 
 def read(logical_address: int):
@@ -115,19 +139,23 @@ def read(logical_address: int):
     page_index = parsed_address.index
     offset = parsed_address.offset
     # checking the tlb
-    if page_index in tlb.tlb:
+    is_tlb_hit = page_index in tlb.tlb and tlb.tlb[page_index].isValid
+    if is_tlb_hit:
         # tlb hit
         logs.tlb_hits += 1
-        frame = tlb.tlb[page_index]
-        page = memory[frame]
+        entry = tlb.tlb[page_index]
+        frame = entry.frame
+        page, read_value = read_mem(entry.frame, offset)
     else:
         # checking the page table
         logs.tlb_misses += 1
-        frame, page = page_table_lookup(page_index)
+        entry = page_table_lookup(page_index)
+        frame = entry.frame
+        page, read_value = read_mem(frame, offset)
         # updating the TLB
         if tlb.current_size == tlb.max_size:
             kick_out_victim()
-        add_to_tlb(page_index, frame)
+        add_to_tlb(page_index, entry)
 
     logs.translated += 1
     read_value = page[offset]
